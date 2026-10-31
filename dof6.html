@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>户外菲涅尔聚光平台 · 拆解与六轴调姿</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./css/dof6.css">
+  <script type="importmap">{"imports":{"three":"./vendor/three/build/three.module.js","three/addons/":"./vendor/three/examples/jsm/"}}</script>
+</head>
+<body>
+<main id="app" data-mode="explode">
+  <canvas id="stage" aria-label="户外菲涅尔聚光平台三维交互场景"></canvas>
+  <div id="label-layer"></div><div class="vignette"></div>
+  <header class="hud-head">
+    <div class="tag"><i></i>户外聚光成型 · 实机复刻 02</div>
+    <h1>户外聚光平台</h1>
+    <p class="subtitle">FRESNEL CONCENTRATOR / 六轴调姿</p>
+    <p class="hint">拖动旋转 · 滚轮缩放 · 点击零件查看参数</p>
+    <nav class="mode-switch panel" aria-label="展示模式">
+      <button type="button" data-mode="explode" class="on" aria-pressed="true">构件拆解</button>
+      <button type="button" data-mode="motion" aria-pressed="false">六轴运动</button>
+    </nav>
+  </header>
+  <section class="hud-info panel" id="info" aria-label="部件参数">
+    <div class="kicker" id="info-kicker">整机概览</div>
+    <button class="close" id="info-close" type="button" aria-label="关闭部件参数">×</button>
+    <h2 id="info-title">六轴调姿 · 太阳聚光</h2>
+    <p id="info-desc">Ø1300 mm 菲涅尔透镜与六轴调姿机构，展示聚光光路和焦点偏差。</p>
+    <div class="spec" id="info-spec"><b>6 根电动缸</b><b>1 单位 = 100 mm</b></div>
+  </section>
+  <section class="pose-panel panel motion-only" aria-label="六自由度控制">
+    <div class="panel-heading"><h2>六自由度控制</h2><span class="status-dot">实时联动</span></div>
+    <p class="panel-note">X / Y 平移 · Z 平台高 1.7–2.7 m · 角度控制姿态</p>
+    <div id="pose-controls"></div>
+    <div class="axis-legend"><span><i class="x"></i>X</span><span><i class="y"></i>Y</span><span><i class="z"></i>Z ↑</span><span>世界坐标</span></div>
+  </section>
+  <section class="length-panel panel" aria-label="六缸长度实时数据">
+    <div class="panel-heading"><h2>六缸长度</h2><span class="unit">mm</span></div>
+    <div id="lengths"></div>
+    <div id="focus-readout" class="locked" aria-live="off"><span>焦点</span><b id="focus-height">z=2200.0 → 100.0 mm</b><span id="focus-error">偏差 0.0 mm</span><strong id="focus-status">锁定</strong></div>
+    <p id="length-note">零位等长校验通过</p>
+  </section>
+  <div class="scene-caption"><span id="scene-mode">构件拆解</span><i></i><span id="scene-status">装配状态</span></div>
+  <footer class="hud-bar panel">
+    <div class="trajectory-row motion-only">
+      <label for="trajectory">预设轨迹</label>
+      <select id="trajectory"><option value="square">圆角方形</option><option value="circle">圆形</option><option value="eight">8 字</option><option value="helix">螺旋上升</option></select>
+      <button class="btn primary" id="path-play" type="button">▶ 播放</button>
+      <button class="btn" id="path-pause" type="button">Ⅱ 暂停</button>
+      <button class="btn" id="path-reset" type="button">↺ 复位</button>
+      <span class="path-time" id="path-time">00.0 / 20.0 s</span>
+    </div>
+    <div class="explode-row">
+      <button class="btn primary" id="explode-auto" type="button" aria-pressed="false">▶ 自动拆解</button>
+      <label class="slider" for="progress"><span>拆解进度</span><input id="progress" type="range" min="0" max="100" step="0.5" value="0"><output id="pct" for="progress">0%</output></label>
+      <div class="views" aria-label="预设机位">
+        <button class="btn on" type="button" data-view="hero">全景</button>
+        <button class="btn" type="button" data-view="front">正视</button>
+        <button class="btn" type="button" data-view="side">侧视</button>
+        <button class="btn" type="button" data-view="top">俯视</button>
+      </div>
+    </div>
+  </footer>
+  <div id="boot"><span class="spinner"></span>正在装填聚光场景…</div>
+</main>
+<script type="module" src="./js/dof6/main.js"></script>
+</body>
+</html>
