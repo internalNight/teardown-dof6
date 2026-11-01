@@ -170,7 +170,10 @@ export function buildRig() {
     guides.push({ obj, anchor, assembly, line });
   }
 
-  function update(pose = ZERO_POSE, explode = 0) {
+  function update(pose = ZERO_POSE, explode = 0, opts = {}) {
+    /* 太阳追踪模式由 main.js 传 opts.showOptics=false，隐藏内置光锥/光束/焦点，改由 sky.js 绘制；
+       不传 opts 时 showOptics 为 true，原有拆解/运动行为完全不变。 */
+    const showOptics = opts.showOptics !== false;
     const ik = inverseKinematics(pose);
     const e = 1 - Math.pow(1 - explode, 3);
     base.position.y = weights.position.y = -2.5 * e;
@@ -201,7 +204,7 @@ export function buildRig() {
     const optics=opticalState(ik), c=toScene(optics.lens), f=toScene(optics.focus);
     cone.position.copy(c).add(f).multiplyScalar(.5);
     cone.quaternion.setFromUnitVectors(yAxis,c.clone().sub(f).normalize());
-    cone.visible=coneEnabled && explode<.0001;
+    cone.visible=coneEnabled && explode<.0001 && showOptics;
     rays.visible=cone.visible;
     const rayPositions=rays.geometry.attributes.position;
     for(let i=0;i<RAY_COUNT;i++){
@@ -209,7 +212,7 @@ export function buildRig() {
       rayPositions.setXYZ(i*2,rimPoint.x,rimPoint.y,rimPoint.z);rayPositions.setXYZ(i*2+1,f.x,f.y,f.z);
     }
     rayPositions.needsUpdate=true;rays.geometry.computeBoundingSphere();
-    focus.position.copy(f);focus.visible=explode<.0001;
+    focus.position.copy(f);focus.visible=explode<.0001 && showOptics;
     const locked=optics.errorMm<2;
     spotMat.color.setHex(locked?0xddffff:0xffb05c);haloMat.uniforms.color.value.setHex(locked?0x5fe3ff:0xffb05c);
     guideMaterial.opacity = .22 * e;

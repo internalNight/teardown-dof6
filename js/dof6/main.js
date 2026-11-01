@@ -7,7 +7,10 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { buildRig, DEFAULT_INFO, toScene } from './model.js';
+import { buildSky, R_SKY } from './sky.js';
 import { CHANNELS, ZERO_POSE, GEOMETRY, clamp, clampPose, trajectoryPose, assertZeroLengths } from './kinematics.js';
+import { solarPosition, daytime, sunPath, timezoneForLongitude, formatClock, parseClock, SOLAR_DEFAULTS } from './solar.js';
+import { trackingSolution, trackingOptics, TRACK_LIMITS, assertTrackerEnvelope } from './tracker.js';
 
 /* 场景、拆解与运动共享一份状态，运动模式的基座铰点始终固定。 */
 const $ = s => document.querySelector(s);
@@ -15,8 +18,16 @@ const params = new URLSearchParams(location.search);
 const canvas = $('#stage'), app = $('#app');
 const easeOut = t => 1 - (1 - t) ** 3;
 assertZeroLengths();
+assertTrackerEnvelope();
 const state = { mode: 'explode', explode: 0, target: 0, auto: false, direction: 1, hold: 0,
   pose: { ...ZERO_POSE }, playing: false, elapsed: 0, duration: 20, path: 'square' };
+/* 太阳轨迹模式：日期/经纬度/当地时刻 + 解算结果；每帧按当前时间重算太阳与六轴姿态。 */
+const SUN_SPEED = 30;               // 播放速度：分钟 / 秒（14 小时日照 ≈ 28 s）
+const sun = { date: SOLAR_DEFAULTS.date, minutes: SOLAR_DEFAULTS.timeMinutes,
+  latitude: SOLAR_DEFAULTS.latitude, longitude: SOLAR_DEFAULTS.longitude,
+  tz: timezoneForLongitude(SOLAR_DEFAULTS.longitude), playing: false, day: null, path: [], frame: null };
+/* 太阳轨迹模式下整机概览卡换成追踪规则说明（文案要短，避免在 1600×900 下压到六缸面板）。 */
+const SUN_INFO = { title: '太阳轨迹 · 追光解算', desc: '按日期/经纬度解算太阳位置；镜面垂直太阳光，六轴反解保持聚光点固定；倾角超出 ±35° 时停止跟随。', spec: ['焦距 2100 mm', '倾角限位 ±35°'] };
 
 /* 基础环境与范本一致：物理金属、室内环境、三色布光及轻量泛光。 */
 let renderer;
@@ -53,6 +64,12 @@ for (let i = 0; i < 380; i++) {
 }
 const dust = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(dustPositions, 3)), new THREE.PointsMaterial({ color: 0x8fa3bd, size: .045, transparent: true, opacity: .5, depthWrite: false })); scene.add(dust);
 const rig = buildRig(); scene.add(rig.root);
+/* 天球/太阳/轨迹/限位锥全部由 sky.js 提供，只在太阳轨迹模式显示。 */
+const sky = buildSky(); scene.add(sky.group); sky.group.visible = false;
+// 太阳轨迹模式机位：从北侧看南天，太阳轨迹弧可见（东=+X，西=−X，南=+Z）。
+const sunViewDirections = { hero: new THREE.Vector3(.9, .34, -2.1), front: new THREE.Vector3(.05, .3, -1),
+  side: new THREE.Vector3(1, .3, .14), top: new THREE.Vector3(.02, 1, .04) };
+const sunCameraTarget = new THREE.Vector3(0, 16.5, 0);
 const ring = new THREE.Mesh(new THREE.TorusGeometry(16, .014, 6, 160), new THREE.MeshBasicMaterial({ color: 0x5fe3ff, transparent: true, opacity: .16 }));
 ring.rotation.x = Math.PI / 2; ring.position.y = -.67; scene.add(ring);
 const grid = new THREE.GridHelper(48, 48, 0x254754, 0x142734); grid.position.y = -.7;
@@ -74,7 +91,7 @@ rig.parts.filter(p => p.label).forEach(p => {
 
 /* 在 CSS2D 投影之后做屏幕排布；用完整标签边界避让 HUD，而非只判断锚点。 */
 const labelPoint = new THREE.Vector3();
-const hudElements = [...document.querySelectorAll('.hud-head,.hud-info,.pose-panel,.length-panel,.hud-bar,.scene-caption')];
+const hudElements = [...document.querySelectorAll('.hud-head,.hud-info,.pose-panel,.sun-panel,.length-panel,.hud-bar,.scene-caption')];
 const labelParts = rig.parts.filter(p => p.el);
 const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
 function layoutLabels() {
@@ -127,7 +144,7 @@ function layoutLabels() {
   }
 }
 function showInfo(part) {
-  const data = part || DEFAULT_INFO;
+  const data = part || (state.mode === 'sun' ? SUN_INFO : DEFAULT_INFO);
   $('#info-kicker').textContent = part ? `部件参数 / ${part.no}` : '整机概览';
   $('#info-title').textContent = part ? part.name : data.title;
   $('#info-desc').textContent = data.desc;
@@ -159,14 +176,31 @@ const viewDirections = { hero: new THREE.Vector3(1, .64, 1.3), front: new THREE.
 let currentView = 'hero';
 function viewportRegion() {
   const w = innerWidth, h = innerHeight, portrait = h > w;
+  const heavy = state.mode !== 'explode';
   let top = portrait ? Math.min(h * .38, w <= 600 ? 520 : 630) : h < 650 ? 60 : 115;
-  const bottom = portrait ? h - (state.mode === 'motion' ? 270 : 220) : h - (state.mode === 'motion' ? 210 : 165);
-  if (portrait && state.mode === 'motion' && w > 600) top = Math.min(bottom - h * .27, Math.max(top, $('.pose-panel').getBoundingClientRect().bottom + 20));
-  return { x: portrait ? w * .5 : w * .5 + 14, y: (top + bottom) / 2 - (portrait && state.mode !== 'motion' ? h * .055 : 0),
+  const bottom = portrait ? h - (heavy ? 270 : 220) : h - (heavy ? 210 : 165);
+  if (portrait && heavy && w > 600) {
+    const panel = state.mode === 'sun' ? $('.sun-panel') : $('.pose-panel');
+    top = Math.min(bottom - h * .27, Math.max(top, panel.getBoundingClientRect().bottom + 20));
+  }
+  /* 手机竖屏的太阳模式：太阳面板占右侧，画面中心左移，避免装置被面板压住。 */
+  const centerX = portrait ? (state.mode === 'sun' && w <= 600 ? w * .4 : w * .5) : w * .5 + 14;
+  return { x: centerX, y: (top + bottom) / 2 - (portrait && state.mode === 'explode' ? h * .055 : 0),
     width: portrait ? w - 55 : Math.max(w * .35, w - 595), height: Math.max(h * .27, bottom - top) };
 }
 function fitView(animate = false) {
   const region = viewportRegion(), e = easeOut(state.explode);
+  /* 太阳轨迹模式：机位从北侧看南天，要同时装下装置与整条太阳轨迹弧。 */
+  if (state.mode === 'sun') {
+    const tangent = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    const width = 38, height = 36;
+    const distance = Math.max(width / (2 * tangent * camera.aspect * region.width / innerWidth),
+      height / (2 * tangent * region.height / innerHeight));
+    const position = sunCameraTarget.clone().add(sunViewDirections[currentView].clone().normalize().multiplyScalar(distance));
+    if (animate) flyTo(position, sunCameraTarget);
+    else { camera.position.copy(position); controls.target.copy(sunCameraTarget); }
+    return;
+  }
   const motion = state.mode === 'motion';
   const target = new THREE.Vector3(0, (motion ? 13.2 : 11.7) + e * 5.4, 0);
   const tangent = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
@@ -243,18 +277,180 @@ $('#trajectory').addEventListener('change', e => {
   pausePath(); state.path = e.target.value; state.elapsed = 0; state.pose = trajectoryPose(state.path, 0); syncInputs(); rebuildPath();
 });
 
+/* ── 太阳轨迹模式 ───────────────────────────────────────────────
+   日期/经纬度 → 太阳高度角、方位角与方向向量；按「镜面⊥太阳、聚光点固定」
+   反解六轴姿态；超出 35° 倾角限位时把方向夹到限位锥上，并显示镜面偏角与光斑偏移。 */
+function normalizeDate(value) {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const [y, m, d] = text.split('-').map(Number);
+  const probe = new Date(Date.UTC(y, m - 1, d));
+  return probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d ? text : null;
+}
+function refreshSunDay() {
+  sun.tz = timezoneForLongitude(sun.longitude);
+  sun.day = daytime(sun.date, sun.latitude, sun.longitude, sun.tz);
+  sun.path = sunPath(sun.date, sun.latitude, sun.longitude, sun.tz, 4).filter(p => p.elevation >= -2);
+  sun.minutes = clamp(sun.minutes, 0, 1440);
+  sky.setDay({ path: sun.path, sunrise: sun.day.sunrise, sunset: sun.day.sunset, solarNoon: sun.day.solarNoon,
+    maxElevation: sun.day.maxElevation, date: sun.date, latitude: sun.latitude, longitude: sun.longitude, tzHours: sun.tz });
+  syncSunInputs();
+}
+function syncSunInputs() {
+  if (!sun.day) return;
+  $('#sun-date').value = sun.date;
+  $('#sun-lat').value = sun.latitude.toFixed(2);
+  $('#sun-lon').value = sun.longitude.toFixed(2);
+  $('#sun-tz').textContent = `UTC${sun.tz >= 0 ? '+' : ''}${sun.tz}`;
+  $('#sun-window').textContent = sun.day.sunrise == null || sun.day.sunset == null
+    ? '极昼 / 极夜 · 全天可跟踪'
+    : `日出 ${formatClock(sun.day.sunrise)} · 日落 ${formatClock(sun.day.sunset)}`;
+  $('#sun-time').value = String(Math.round(sun.minutes));
+  $('#sun-time-label').textContent = formatClock(sun.minutes);
+}
+const SUN_HOME_LENS = [0, 0, GEOMETRY.homeHeight];
+function sunFrameAt(minutes) {
+  const sp = solarPosition(sun.date, minutes, sun.latitude, sun.longitude, sun.tz);
+  if (sp.elevation < 0) {
+    return { minutes, sp, night: true, limited: false, epsilonDeg: 0, tiltDeg: null, solution: null, optics: null,
+      pose: { ...ZERO_POSE }, lensCenter: SUN_HOME_LENS.slice(), desiredLensCenter: [0, 0, 1],
+      normal: [0, 0, 1], spot: [0, 0, 1], spotOffsetMm: 0, sunAngleDeg: 0 };
+  }
+  const solution = trackingSolution(sp.direction);
+  const optics = trackingOptics(solution.pose, sp.direction);
+  return { minutes, sp, night: false, limited: solution.limited, epsilonDeg: solution.epsilonDeg,
+    tiltDeg: solution.tiltDeg, solution, optics, pose: solution.pose, lensCenter: optics.lensCenter,
+    normal: optics.normal, desiredLensCenter: solution.desiredLensCenter, spot: optics.spot,
+    spotOffsetMm: optics.spotOffsetMm, sunAngleDeg: optics.sunAngleDeg };
+}
+function updateSunHud(frame) {
+  if (!frame) return;
+  const day = sun.day;
+  $('#sun-elev').textContent = `${frame.sp.elevation.toFixed(1)}°`;
+  $('#sun-azim').textContent = `${frame.sp.azimuth.toFixed(1)}°`;
+  $('#sun-clock').textContent = formatClock(frame.minutes);
+  $('#sun-time').value = String(Math.round(frame.minutes));
+  $('#sun-time-label').textContent = formatClock(frame.minutes);
+  $('#sun-tilt').textContent = frame.night ? '—' : `${frame.solution.tiltDeg.toFixed(1)}° / ${TRACK_LIMITS.maxTiltDeg}°`;
+  $('#sun-angle').textContent = frame.night ? '—' : `${frame.sunAngleDeg.toFixed(1)}°`;
+  $('#sun-spot').textContent = frame.night ? '—' : `${frame.spotOffsetMm.toFixed(0)} mm`;
+  const stateEl = $('#sun-state');
+  stateEl.textContent = frame.night ? '夜间归位' : frame.limited ? '倾角限位 · 停止跟随' : '跟随中 · 光斑锁定';
+  stateEl.className = frame.night ? 'night' : frame.limited ? 'limited' : 'tracking';
+  const pose = frame.pose;
+  $('#sun-pose').textContent = `X ${pose.x.toFixed(0)} · Y ${pose.y.toFixed(0)} · Z ${(GEOMETRY.homeHeight * 100 + pose.z).toFixed(0)}`
+    + ` · A ${pose.roll.toFixed(1)}° · B ${pose.pitch.toFixed(1)}° · C ${pose.yaw.toFixed(1)}°`;
+  const locked = !frame.night && !frame.limited;
+  $('#focus-readout').classList.toggle('locked', locked);
+  $('#focus-readout').firstElementChild.textContent = '镜面';
+  $('#focus-height').textContent = frame.night ? '夜间 · 归位待机' : `镜面-太阳 ${frame.sunAngleDeg.toFixed(1)}°`;
+  $('#focus-error').textContent = frame.night ? '光斑 —' : `光斑偏移 ${frame.spotOffsetMm.toFixed(0)} mm`;
+  $('#focus-status').textContent = frame.night ? '夜间' : frame.limited ? '偏斜' : '锁定';
+  $('#scene-status').textContent = frame.night ? '夜间归位 · 等待日出'
+    : frame.limited ? `超出倾角限位 ${TRACK_LIMITS.maxTiltDeg}° · 停止跟随` : '跟随太阳 · 光斑锁定';
+  $('#length-note').textContent = '太阳追踪 · 下铰点固定 · 倾角限位 35°';
+  if (day && day.sunrise != null) {
+    $('#sun-live').title = `日出 ${formatClock(day.sunrise)} / 日落 ${formatClock(day.sunset)}`;
+  }
+}
+function sunPlayWindow() {
+  const day = sun.day || {};
+  const start = day.sunrise != null ? Math.max(0, day.sunrise - 20) : 0;
+  const end = day.sunset != null ? Math.min(1440, day.sunset + 20) : 1440;
+  return { start, end: Math.max(start + 1, end) };
+}
+function playSun() {
+  if (state.mode !== 'sun') setMode('sun');
+  const window = sunPlayWindow();
+  if (sun.minutes < window.start || sun.minutes >= window.end) sun.minutes = window.start;
+  sun.playing = true;
+  $('#sun-play').classList.add('on'); $('#sun-play').setAttribute('aria-pressed', 'true');
+}
+function pauseSun() {
+  sun.playing = false;
+  $('#sun-play').classList.remove('on'); $('#sun-play').setAttribute('aria-pressed', 'false');
+}
+function sunJump(minutes) {
+  pauseSun();
+  if (!sun.day) refreshSunDay();
+  sun.minutes = clamp(minutes, 0, 1440);
+  syncSunInputs();
+}
+$('#sun-play').addEventListener('click', playSun);
+$('#sun-pause').addEventListener('click', pauseSun);
+$('#sun-noon').addEventListener('click', () => sunJump(sun.day?.solarNoon ?? 720));
+$('#sun-rise').addEventListener('click', () => sunJump(sun.day?.sunrise ?? 360));
+$('#sun-set').addEventListener('click', () => sunJump(sun.day?.sunset ?? 1080));
+$('#sun-time').addEventListener('input', e => { pauseSun(); sun.minutes = clamp(Number(e.target.value), 0, 1440); });
+$('#sun-date').addEventListener('change', e => {
+  const value = normalizeDate(e.target.value);
+  if (!value) { e.target.value = sun.date; return; }
+  sun.date = value; refreshSunDay();
+});
+const readSunNumber = (input, lo, hi, fallback) => {
+  const value = Number(input.value);
+  if (!Number.isFinite(value)) { input.value = fallback.toFixed(2); return fallback; }
+  const clamped = clamp(value, lo, hi);
+  input.value = clamped.toFixed(2);
+  return clamped;
+};
+$('#sun-lat').addEventListener('change', e => { sun.latitude = readSunNumber(e.target, -89, 89, sun.latitude); refreshSunDay(); });
+$('#sun-lon').addEventListener('change', e => { sun.longitude = readSunNumber(e.target, -180, 180, sun.longitude); refreshSunDay(); });
+
+/* 画面里直接拖动太阳：按住太阳沿当日轨迹移动，最近轨迹采样点即时间。 */
+const sunRaycaster = new THREE.Raycaster(), sunPointer = new THREE.Vector2(), sunProbe = new THREE.Vector3();
+let sunDrag = false;
+function pointRay(event) {
+  const rect = canvas.getBoundingClientRect();
+  sunPointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1);
+  sunRaycaster.setFromCamera(sunPointer, camera);
+  return sunRaycaster;
+}
+function overSun(event) {
+  if (state.mode !== 'sun') return false;
+  return pointRay(event).intersectObject(sky.handle, false).length > 0;
+}
+function sunTimeFromPointer(event) {
+  if (!sun.path.length) return sun.minutes;
+  pointRay(event);
+  const width = canvas.clientWidth || innerWidth, height = canvas.clientHeight || innerHeight;
+  let best = null, bestDistance = Infinity;
+  for (const sample of sun.path) {
+    sunProbe.copy(toScene(sample.direction.map(value => value * R_SKY))).project(camera);
+    if (sunProbe.z < -1 || sunProbe.z > 1) continue;
+    const dx = (sunProbe.x - sunPointer.x) * width / 2, dy = (sunProbe.y - sunPointer.y) * height / 2;
+    const distance = dx * dx + dy * dy;
+    if (distance < bestDistance) { bestDistance = distance; best = sample; }
+  }
+  return best ? best.minutes : sun.minutes;
+}
+function beginSunDrag(event) {
+  sunDrag = true; controls.enabled = false; pauseSun(); canvas.style.cursor = 'grabbing';
+  try { canvas.setPointerCapture(event.pointerId); } catch { /* 某些浏览器不支持捕获，退化为普通拖动 */ }
+}
+function endSunDrag() { sunDrag = false; controls.enabled = true; canvas.style.cursor = ''; }
+function dragSun(event) {
+  sun.minutes = clamp(sunTimeFromPointer(event), 0, 1440);
+}
+
 /* 模式切换先归零装配；运动时不保留任何拆解偏移。 */
 function setAuto(on) {
   state.auto = on; state.direction = state.explode > .98 ? -1 : 1; state.hold = 0;
   $('#explode-auto').textContent = on ? 'Ⅱ 暂停拆解' : '▶ 自动拆解'; $('#explode-auto').setAttribute('aria-pressed', String(on));
 }
 function setMode(mode) {
-  state.mode = mode; app.dataset.mode = mode; pausePath(); setAuto(false);
+  state.mode = mode; app.dataset.mode = mode; pausePath(); pauseSun(); setAuto(false);
   state.explode = 0; state.target = 0;
   if (mode === 'explode') state.pose = { ...ZERO_POSE };
   document.querySelectorAll('.mode-switch button').forEach(b => { const on = b.dataset.mode === mode; b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); });
-  pathGroup.visible = mode === 'motion'; selectedId = null; showInfo(null); rig.parts.forEach(p => p.el?.classList.remove('is-sel'));
-  $('#scene-mode').textContent = mode === 'motion' ? '六轴运动' : '构件拆解';
+  pathGroup.visible = mode === 'motion';
+  sky.group.visible = mode === 'sun';
+  if (mode === 'sun') refreshSunDay();
+  selectedId = null; showInfo(null); rig.parts.forEach(p => p.el?.classList.remove('is-sel'));
+  $('#scene-mode').textContent = mode === 'motion' ? '六轴运动' : mode === 'sun' ? '太阳轨迹' : '构件拆解';
+  $('#hint').textContent = mode === 'sun'
+    ? '拖动太阳或时间轴 · 滚轮缩放 · 点击零件查看参数'
+    : mode === 'motion' ? '滑杆 / 预设轨迹 · 拖动旋转 · 点击零件查看参数' : '拖动旋转 · 滚轮缩放 · 点击零件查看参数';
   $('#progress').value = '0'; syncInputs(); setProjection(); userView = false; fitView(true);
 }
 document.querySelectorAll('.mode-switch button').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
@@ -269,14 +465,27 @@ function pick(event) {
   raycaster.setFromCamera(pointer, camera);
   return raycaster.intersectObject(rig.root, true).find(h => h.object.isMesh && h.object.userData.partId)?.object.userData.partId ?? null;
 }
-canvas.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; });
-canvas.addEventListener('pointermove', e => setHover(pick(e)));
-canvas.addEventListener('pointerleave', () => setHover(null));
-canvas.addEventListener('pointerup', e => { if (down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) < 6) selectPart(pick(e)); down = null; });
-canvas.addEventListener('pointercancel', () => { down = null; });
+canvas.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; if (overSun(e)) beginSunDrag(e); });
+canvas.addEventListener('pointermove', e => {
+  if (sunDrag) { dragSun(e); return; }
+  if (state.mode === 'sun' && overSun(e)) { setHover(null); canvas.style.cursor = 'grab'; return; }
+  setHover(pick(e));
+});
+canvas.addEventListener('pointerleave', () => { setHover(null); if (state.mode === 'sun' && !sunDrag) canvas.style.cursor = ''; });
+canvas.addEventListener('pointerup', e => {
+  if (sunDrag) { endSunDrag(); down = null; return; }
+  if (down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) < 6) selectPart(pick(e)); down = null;
+});
+canvas.addEventListener('pointercancel', () => { endSunDrag(); down = null; });
+canvas.addEventListener('lostpointercapture', () => { if (sunDrag) endSunDrag(); });
 window.addEventListener('keydown', e => {
   if (e.target.closest('input,select,button')) return;
-  if (e.code === 'Space') { e.preventDefault(); if (state.mode === 'motion') state.playing ? pausePath() : playPath(); else setAuto(!state.auto); }
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (state.mode === 'motion') state.playing ? pausePath() : playPath();
+    else if (state.mode === 'sun') sun.playing ? pauseSun() : playSun();
+    else setAuto(!state.auto);
+  }
   if (e.key === 'Escape') selectPart(null);
   if (e.key.toLowerCase() === 'r') { userView = false; currentView = 'hero'; fitView(true); }
 });
@@ -310,7 +519,26 @@ function tick() {
     }
     state.pose = clampPose(trajectoryPose(state.path, state.elapsed / state.duration)); syncInputs();
   }
-  const ik = rig.update(state.pose, state.mode === 'explode' ? state.explode : 0); updateTarget();
+  let ik;
+  if (state.mode === 'sun') {
+    if (sun.playing) {
+      const window = sunPlayWindow();
+      sun.minutes += dt * SUN_SPEED;
+      if (sun.minutes > window.end) sun.minutes = window.start + (sun.minutes - window.end) % (window.end - window.start);
+    }
+    sun.frame = sunFrameAt(sun.minutes);
+    ik = rig.update(sun.frame.pose, 0, { showOptics: false });
+    const frame = sun.frame;
+    sky.update({ direction: frame.sp.direction, elevation: frame.sp.elevation, azimuth: frame.sp.azimuth,
+      visible: !frame.night && frame.sp.elevation > -2, night: frame.night,
+      limited: frame.limited, epsilonDeg: frame.epsilonDeg, sunAngleDeg: frame.sunAngleDeg,
+      target: [0, 0, 1], lensCenter: frame.lensCenter, desiredLensCenter: frame.desiredLensCenter,
+      normal: frame.normal, spot: frame.spot, spotOffsetMm: frame.spotOffsetMm, maxTiltDeg: TRACK_LIMITS.maxTiltDeg });
+    updateTarget();
+  } else {
+    ik = rig.update(state.pose, state.mode === 'explode' ? state.explode : 0);
+    updateTarget();
+  }
   rig.parts.forEach(p => {
     if (!p.el) return;
     p.labelObj.position.copy(p.labelPos);
@@ -324,15 +552,22 @@ function tick() {
       r.bar.style.width = `${clamp((length - GEOMETRY.legMin) / ((GEOMETRY.legMax - GEOMETRY.legMin) / 100), 0, 100)}%`;
       r.row.classList.toggle('limit',limit);r.row.classList.toggle('warn',!limit && warn);
     });
-    const o=ik.optics, locked=o.errorMm<2;
-    $('#focus-readout').classList.toggle('locked',locked);
-    $('#focus-height').textContent=`z=${(o.lens[2]*100).toFixed(1)} → ${(o.focus[2]*100).toFixed(1)} mm`;
-    $('#focus-error').textContent=`偏差 ${o.errorMm.toFixed(1)} mm`;
-    $('#focus-status').textContent=locked ? '锁定' : '偏离';
-    $('#length-note').textContent = state.mode === 'motion' ? '实时长度 · 下铰点固定' : state.explode > .01 ? '拆解示意 · 数据为装配零位长度' : '零位等长校验通过';
+    if (state.mode === 'sun') {
+      updateSunHud(sun.frame);
+    } else {
+      const o=ik.optics, locked=o.errorMm<2;
+      $('#focus-readout').classList.toggle('locked',locked);
+      $('#focus-readout').firstElementChild.textContent = '焦点';
+      $('#focus-height').textContent=`z=${(o.lens[2]*100).toFixed(1)} → ${(o.focus[2]*100).toFixed(1)} mm`;
+      $('#focus-error').textContent=`偏差 ${o.errorMm.toFixed(1)} mm`;
+      $('#focus-status').textContent=locked ? '锁定' : '偏离';
+      $('#length-note').textContent = state.mode === 'motion' ? '实时长度 · 下铰点固定' : state.explode > .01 ? '拆解示意 · 数据为装配零位长度' : '零位等长校验通过';
+      $('#scene-status').textContent = state.mode === 'explode'
+        ? (state.explode > .005 ? `拆解 ${Math.round(state.explode * 100)}%` : '装配状态')
+        : state.playing ? '轨迹运行中' : '手动控制 / 已暂停';
+    }
     const pct = Math.round(state.explode * 100); $('#progress').value = String(pct); $('#pct').textContent = `${pct}%`;
     $('#path-time').textContent = `${state.elapsed.toFixed(1).padStart(4, '0')} / 20.0 s`;
-    $('#scene-status').textContent = state.mode === 'explode' ? pct ? `拆解 ${pct}%` : '装配状态' : state.playing ? '轨迹运行中' : '手动控制 / 已暂停';
   }
   if (!userView && Math.abs(state.explode - previousFit) > .012 && !tween.active) { previousFit = state.explode; fitView(true); }
   controls.autoRotate = state.mode === 'motion' && !userView && !tween.active && performance.now() - lastInteract > 4500;
@@ -346,14 +581,27 @@ function tick() {
   labelRenderer.render(scene, camera); layoutLabels();
 }
 
-/* 演示参数仅用于可重复自检：默认拆解，?mode=motion&path=helix&play=1。 */
+/* 演示参数仅用于可重复自检：默认拆解，?mode=motion&path=helix&play=1，?mode=sun&time=11:30。 */
 if (params.get('ui') === '0') document.body.classList.add('ui-hidden');
-setMode(params.get('mode') === 'motion' ? 'motion' : 'explode');
+const sunRequested = params.get('mode') === 'sun' || params.get('path') === 'sun';
+if (sunRequested) {
+  const date = normalizeDate(params.get('date')); if (date) sun.date = date;
+  if (params.has('time')) {
+    const raw = params.get('time');
+    const minutes = raw.includes(':') ? parseClock(raw) : Number(raw);
+    if (Number.isFinite(minutes)) sun.minutes = clamp(minutes, 0, 1440);
+  }
+  const latitude = Number(params.get('lat')), longitude = Number(params.get('lon'));
+  if (params.has('lat') && Number.isFinite(latitude)) sun.latitude = clamp(latitude, -89, 89);
+  if (params.has('lon') && Number.isFinite(longitude)) sun.longitude = clamp(longitude, -180, 180);
+}
+setMode(sunRequested ? 'sun' : params.get('mode') === 'motion' ? 'motion' : 'explode');
 if (state.mode === 'explode' && params.has('t')) state.explode = state.target = clamp(Number(params.get('t')), 0, 1);
 if (['square', 'circle', 'eight', 'helix'].includes(params.get('path'))) { state.path = params.get('path'); $('#trajectory').value = state.path; }
 if (viewDirections[params.get('view')]) { currentView = params.get('view'); userView = true; }
 if (params.get('auto') === '1' && state.mode === 'explode') setAuto(true);
 if (params.get('play') === '1' && state.mode === 'motion') playPath();
+if (params.get('play') === '1' && state.mode === 'sun') playSun();
 rebuildPath(); resize(); fitView(); tween.active = false; previousFit = state.explode;
 /* 显式机位最后覆盖自动构图，确保录屏参数可重复。 */
 const readVector = key => {
@@ -363,3 +611,10 @@ const readVector = key => {
 const manualCamera=readVector('cam'), manualLook=readVector('look');
 if(manualCamera){camera.position.copy(manualCamera);if(manualLook)controls.target.copy(manualLook);userView=true;}
 showInfo(null); tick(); setTimeout(() => $('#boot').classList.add('hide'), 260);
+/* 自检/验收钩子（?debug=1）：暴露状态与解算模块，供无头浏览器断言，不影响正常展示。 */
+if (params.get('debug') === '1') {
+  window.__dof6 = { state, sun, sky, rig, camera, controls,
+    get sunDrag() { return sunDrag; },
+    solar: { solarPosition, daytime, sunPath, formatClock, parseClock, timezoneForLongitude },
+    tracker: { trackingSolution, trackingOptics, TRACK_LIMITS } };
+}

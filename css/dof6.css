@@ -5,9 +5,9 @@ button,input,select{font:inherit}button,select{cursor:pointer}button:focus-visib
 #app{position:fixed;inset:0;background:radial-gradient(ellipse at 48% 43%,#0a1626,#05070d 78%)}
 #app:before{content:"";position:absolute;inset:0;pointer-events:none;background-image:radial-gradient(1px 1px at 14% 22%,#8fa3bd 90%,transparent),radial-gradient(1px 1px at 75% 18%,#5fe3ff 90%,transparent),radial-gradient(1px 1px at 37% 73%,#8fa3bd 90%,transparent);background-size:267px 323px,431px 383px,373px 283px;opacity:.3}
 #stage{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}#stage:active{cursor:grabbing}
-body.ui-hidden .hud-head,body.ui-hidden .hud-info,body.ui-hidden .pose-panel,body.ui-hidden .length-panel,body.ui-hidden .hud-bar,body.ui-hidden .scene-caption{display:none!important}
+body.ui-hidden .hud-head,body.ui-hidden .hud-info,body.ui-hidden .pose-panel,body.ui-hidden .sun-panel,body.ui-hidden .length-panel,body.ui-hidden .hud-bar,body.ui-hidden .scene-caption{display:none!important}
 #label-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:1}.vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse,transparent 36%,rgba(0,0,0,.36))}
-.hud-head,.hud-info,.pose-panel,.length-panel,.hud-bar,.scene-caption{z-index:2}
+.hud-head,.hud-info,.pose-panel,.length-panel,.hud-bar,.scene-caption,.sun-panel{z-index:2}
 .panel{background:var(--panel);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid var(--line);border-radius:14px;box-shadow:0 16px 45px #0003}
 .hud-head{position:absolute;top:30px;left:34px;pointer-events:none}.tag{display:flex;align-items:center;gap:8px;color:var(--cyan);font-size:11px;letter-spacing:.22em}.tag i,.status-dot:before{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--cyan);box-shadow:0 0 10px var(--cyan)}
 h1{font-size:clamp(27px,3vw,42px);font-weight:700;letter-spacing:.05em;margin:13px 0 9px;line-height:1.2}.subtitle{color:var(--cyan);font-size:12px;letter-spacing:.3em;margin:0}.hint{color:var(--dim);font-size:11px;margin:14px 0 18px}
@@ -34,3 +34,61 @@ input[type=range]{appearance:none;-webkit-appearance:none;height:18px;background
 @media (max-width:600px){.length-panel{width:195px}.length-row{grid-template-columns:16px 1fr 85px;gap:5px;font-size:10px}#focus-readout,#focus-readout>b{font-size:8px}.subtitle{letter-spacing:.12em}}
 
 @media (orientation:landscape) and (min-height:651px){.hud-info p{font-size:11px;line-height:1.7}#app[data-mode] .length-panel{bottom:110px}}
+
+/* ── 太阳轨迹模式（第三个展示模式）：太阳位置面板 + 时间轴 ───────────────── */
+.sun-only{display:none}
+#app[data-mode=sun] .sun-only{display:block}
+#app[data-mode=sun] .motion-only{display:none}
+#app[data-mode=sun] .sun-row{display:flex}
+.sun-panel{position:absolute;top:32px;right:34px;width:284px;padding:19px;max-height:calc(100% - 190px);overflow:auto;display:none}
+#app[data-mode=sun] .sun-panel{display:block}
+.sun-fields{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:14px 0 12px}
+.sun-field{display:flex;flex-direction:column;gap:4px;font-size:10px;color:var(--dim)}
+.sun-field.wide{grid-column:1/-1}
+.sun-field input{width:100%;border:1px solid #78c8ff22;background:#050a1280;color:var(--ink);border-radius:6px;padding:5px 7px;font:11px var(--mono);color-scheme:dark}
+.sun-readout{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;padding:11px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.sun-readout>div,.sun-track>div{display:flex;justify-content:space-between;align-items:baseline;gap:6px;font-size:10px;color:var(--dim);line-height:1.9}
+.sun-readout b,.sun-track b{font:10px var(--mono);font-weight:400;color:var(--ink)}
+.sun-track{padding:10px 0;border-bottom:1px solid var(--line)}
+.sun-track-head{display:flex;justify-content:space-between;align-items:baseline;font-size:10px;color:var(--dim)}
+#sun-state{font-size:11px;color:var(--cyan);font-weight:700}
+#sun-state.limited{color:var(--amber)}
+#sun-state.night{color:var(--dim)}
+#sun-state.tracking{color:var(--cyan)}
+.sun-pose{font:9px var(--mono);color:var(--dim);padding:10px 0 0;line-height:1.65;white-space:normal;letter-spacing:0}
+.sun-jump{display:flex;gap:6px;margin-top:10px}
+.sun-jump .btn{flex:1;padding:7px 6px;font-size:10px;border-radius:9px;text-align:center}
+.sun-row{display:none;align-items:center;justify-content:center;gap:12px;padding-bottom:12px;margin-bottom:12px;border-bottom:1px solid var(--line)}
+.sun-row>label{font-size:11px;color:var(--dim);white-space:nowrap}
+.sun-row input[type=range]{flex:1;min-width:120px}
+.sun-clock{font:11px var(--mono);color:var(--cyan);min-width:40px;text-align:right}
+.sun-window{font:10px var(--mono);color:var(--dim);white-space:nowrap}
+@media (orientation:portrait){.sun-panel{top:222px;right:30px;width:252px;max-height:calc(100% - 560px)}}
+@media (max-width:600px){
+  /* 手机竖屏空间太小：太阳模式收起概览卡与六缸面板，避免与太阳面板互相遮挡。 */
+  #app[data-mode=sun] .hud-info:not(.selected){display:none}
+  #app[data-mode=sun] .length-panel{display:none}
+  /* 390px 级手机：只留关键读数与状态，日期/经纬度用 URL 参数设置。 */
+  #app[data-mode=sun] .sun-fields{display:none}
+  #app[data-mode=sun] .sun-jump{display:none}
+  #app[data-mode=sun] .sun-panel{top:186px;right:12px;width:190px}
+  .sun-panel{top:184px;right:16px;width:198px;padding:12px;max-height:calc(100% - 440px)}
+  .sun-panel .panel-note{display:none}
+  .sun-panel .panel-heading h2{font-size:12px}
+  .sun-fields{gap:5px;margin:9px 0}
+  .sun-field{font-size:9px;gap:3px}
+  .sun-field input{padding:3px 4px;font-size:9px}
+  .sun-readout{gap:2px 6px;padding:8px 0}
+  .sun-readout>div,.sun-track>div{font-size:9px;line-height:1.7}
+  .sun-readout b,.sun-track b{font-size:9px}
+  .sun-pose{display:none}
+  .sun-jump{margin-top:8px;gap:4px}
+  .sun-jump .btn{padding:6px 4px;font-size:9px}
+  .sun-row{flex-wrap:wrap;gap:7px}
+  .sun-row>label{font-size:9px}
+  .sun-window{display:none}
+  .sun-clock{min-width:32px;font-size:10px}
+}
+@media (max-height:650px) and (orientation:landscape){
+  .sun-panel{top:15px;right:20px;width:252px;padding:13px;max-height:calc(100% - 150px)}
+}
